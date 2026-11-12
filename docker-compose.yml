@@ -1,0 +1,125 @@
+# FoodSafe: microservices version
+#   browser -> gateway (nginx) -> temperature / food / alert / report services
+#   temperature-service -> temperature-db      food-service -> food-db   (database per service)
+#   alert-service and report-service are stateless and call the two data services over HTTP.
+# Only the gateway publishes a port. Everything else is reachable only inside the compose network.
+
+name: foodsafe   # new project name => fresh containers/volumes, no clash with older runs
+
+x-pyhealth: &pyhealth
+  interval: 10s
+  timeout: 5s
+  retries: 12
+  start_period: 5s
+
+services:
+  gateway:
+    build: ./gateway
+    ports:
+      - "${GATEWAY_PORT:-9090}:80"
+    depends_on:
+      temperature-service: { condition: service_healthy }
+      food-service:        { condition: service_healthy }
+      alert-service:       { condition: service_healthy }
+      report-service:      { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      <<: *pyhealth
+    networks: [backend]
+    restart: unless-stopped
+
+  temperature-service:
+    build: ./services/temperature-service
+    environment:
+      DATABASE_URL: postgresql://${TEMP_DB_USER:-foodsafe}:${TEMP_DB_PASSWORD:-change-me-temp}@temperature-db:5432/temperature
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-true}
+    depends_on:
+      temperature-db: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:5001/health', timeout=3)"]
+      <<: *pyhealth
+    networks: [backend, temperature-net]
+    restart: unless-stopped
+
+  temperature-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${TEMP_DB_USER:-foodsafe}
+      POSTGRES_PASSWORD: ${TEMP_DB_PASSWORD:-change-me-temp}
+      POSTGRES_DB: temperature
+    volumes:
+      - temperature-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d temperature"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [temperature-net]
+    restart: unless-stopped
+
+  food-service:
+    build: ./services/food-service
+    environment:
+      DATABASE_URL: postgresql://${FOOD_DB_USER:-foodsafe}:${FOOD_DB_PASSWORD:-change-me-food}@food-db:5432/food
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-true}
+    depends_on:
+      food-db: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:5002/health', timeout=3)"]
+      <<: *pyhealth
+    networks: [backend, food-net]
+    restart: unless-stopped
+
+  food-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${FOOD_DB_USER:-foodsafe}
+      POSTGRES_PASSWORD: ${FOOD_DB_PASSWORD:-change-me-food}
+      POSTGRES_DB: food
+    volumes:
+      - food-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d food"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [food-net]
+    restart: unless-stopped
+
+  alert-service:
+    build: ./services/alert-service
+    environment:
+      TEMPERATURE_SERVICE_URL: http://temperature-service:5001
+      FOOD_SERVICE_URL: http://food-service:5002
+      STALE_READING_HOURS: ${STALE_READING_HOURS:-24}
+    depends_on:
+      temperature-service: { condition: service_healthy }
+      food-service:        { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:5003/health', timeout=3)"]
+      <<: *pyhealth
+    networks: [backend]
+    restart: unless-stopped
+
+  report-service:
+    build: ./services/report-service
+    environment:
+      TEMPERATURE_SERVICE_URL: http://temperature-service:5001
+      FOOD_SERVICE_URL: http://food-service:5002
+    depends_on:
+      temperature-service: { condition: service_healthy }
+      food-service:        { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:5004/health', timeout=3)"]
+      <<: *pyhealth
+    networks: [backend]
+    restart: unless-stopped
+
+volumes:
+  temperature-data:
+  food-data:
+
+networks:
+  backend:         # gateway and services talk here
+  temperature-net: # only temperature-service + its database
+  food-net:        # only food-service + its database
